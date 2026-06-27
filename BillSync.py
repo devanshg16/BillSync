@@ -140,61 +140,120 @@ with tab1:
                         st.rerun()
 
 # --- TAB 2: TIMELINE VIEW ---
-# --- TAB 2: TIMELINE VIEW ---
 with tab2:
     st.subheader("Chronological Expense Stream")
     
     # Virtual Scrolling configuration interface
     col_v1, col_v2 = st.columns(2)
     with col_v1:
-        lookback = st.slider("Lookback History (Days Past)", min_value=0, max_value=60, value=30, step=5)
+        # max_value is now 365, but the step interval stays at 5 days
+        lookback = st.slider("Lookback History (Days Past)", min_value=0, max_value=365, value=30, step=5)
     with col_v2:
         lookforward = st.slider("Future Forecast Horizon (Days Out)", min_value=30, max_value=365, value=90, step=30)
         
     start_range = today - timedelta(days=lookback)
     end_range = today + timedelta(days=lookforward)
     
-    # Generate instances dynamically via Template vs Instance Logic
-    all_instances = generate_instances(st.session_state.templates, start_range, end_range)
+    # Back-end compilation window extended safely to catch older un-cleared obligations
+    effective_start = today - timedelta(days=365)
+    all_instances = generate_instances(st.session_state.templates, effective_start, end_range)
     
-    # --- TIME-BASED GROUPED FEED ---
+    # --- STEP 1: DYNAMIC ROLLING WINDOW CALCULATION ---
+    # Scan historical instances to map out the absolute latest past date for each individual bill name
+    most_recent_past_dates = {}
+    for inst in all_instances:
+        if inst["date"] < today:
+            name = inst["name"]
+            if name not in most_recent_past_dates or inst["date"] > most_recent_past_dates[name]:
+                most_recent_past_dates[name] = inst["date"]
+
+    # --- STEP 2: APPLY ROLLING RULES & FILTER WINDOW ---
+    filtered_instances = []
+    for inst in all_instances:
+        is_past = inst["date"] < today
+        name = inst["name"]
+        
+        # Default rolling fallback assignments
+        if is_past:
+            # Only the single most recent historical occurrence defaults to overdue
+            if inst["date"] == most_recent_past_dates.get(name):
+                default_paid = False
+                is_overdue = True
+            else:
+                # All older historical instances are cleanly swept to true
+                default_paid = True
+                is_overdue = False
+        else:
+            # Future instances are pending/scheduled by default
+            default_paid = False
+            is_overdue = False
+
+        # Load session state overrides if the user interacted manually via toggle buttons
+        key = (inst["template_id"], inst["date_str"])
+        if key in st.session_state.overrides:
+            inst["paid"] = st.session_state.overrides[key]["paid"]
+            # Recalculate runtime overdue metric based on current absolute state context
+            is_overdue = is_past and not inst["paid"]
+        else:
+            inst["paid"] = default_paid
+
+        # Match entry against active timeline sliders criteria OR retain if it's explicitly overdue
+        if (inst["date"] >= start_range) or is_overdue:
+            # Cache active overdue boolean as a secondary sorting attribute key helper
+            inst["_is_overdue_flag"] = is_overdue
+            filtered_instances.append(inst)
+            
+    # --- STEP 3: PRIORITY STATUS STREAM SORTING ---
+    # Sorts by active overdue status flag first, then falls back to clean chronological sequencing
+    filtered_instances.sort(key=lambda x: (not x.get("_is_overdue_flag", False), x["date"]))
+    
+    # --- TIME-BASED GROUPED FEED RENDER ---
     st.markdown("### 🧭 Live Feed Stream")
     
-    if not all_instances:
+    if not filtered_instances:
         st.warning("No generated schedule instances fall within this selected timeframe.")
     else:
         current_bucket = ""
         
-        for inst in all_instances:
-            # Create chronological headers (e.g., "June 2026")
-            inst_bucket = inst["date"].strftime("%B %Y")
-            if inst_bucket != current_bucket:
-                current_bucket = inst_bucket
-                st.markdown(f"#### 📅 {current_bucket}")
-                
-            # Determine if this specific item is overdue
+        for inst in filtered_instances:
             is_past = inst["date"] < today
-            is_overdue = is_past and not inst["paid"]
+            is_overdue = inst.get("_is_overdue_flag", False)
             
-            # Row render
+            # Grouping header logic mapping
+            if is_overdue:
+                if current_bucket != "⚠️ ACTIVELY OVERDUE":
+                    current_bucket = "⚠️ ACTIVELY OVERDUE"
+                    st.markdown(f"#### {current_bucket}")
+            else:
+                inst_bucket = inst["date"].strftime("%B %Y")
+                if inst_bucket != current_bucket:
+                    current_bucket = inst_bucket
+                    st.markdown(f"#### 📅 {current_bucket}")
+            
+            # Simple high-contrast native text badges
+            if inst["paid"]:
+                status_text = "🟢 Verified Paid"
+            elif is_overdue:
+                status_text = "🔴 OVERDUE"
+            else:
+                status_text = "🟡 Scheduled"
+
+            # Render standard native container with explicit clean borders
             with st.container(border=True):
-                cols = st.columns([1, 2, 2, 2, 1])
+                cols = st.columns([3, 2, 2, 1.5], vertical_alignment="center")
                 
                 with cols[0]:
-                    st.write(f"**{inst['date'].strftime('%d %a')}**")
-                
-                with cols[1]:
-                    # Fade out text only if it's in the past AND fully paid
                     text_opacity = "0.5" if (is_past and inst["paid"]) else "1.0"
-                    st.markdown(f"<span style='opacity:{text_opacity}; font-weight:bold;'>{inst['name']}</span>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='opacity:{text_opacity};'><b style='font-size:1.15rem;'>{inst['name']}</b></div>", unsafe_allow_html=True)
                     st.caption(f"{inst['category']} • {inst['method']}")
                     
-                with cols[2]:
-                    # Variable Adjustments Inline Feature
+                with cols[1]:
                     new_amt = st.number_input(
-                        "Amount Due", 
+                        "Amount Due (£)", 
                         value=float(inst["amount"]), 
                         key=f"amt_{inst['template_id']}_{inst['date_str']}",
+                        step=0.01,
+                        format="%.2f",
                         label_visibility="collapsed"
                     )
                     if new_amt != float(inst["amount"]):
@@ -205,17 +264,10 @@ with tab2:
                             st.session_state.overrides[key]["amount"] = new_amt
                         st.rerun()
                         
-                with cols[3]:
-                    # Dynamic Status Box Color Logic
-                    if inst["paid"]:
-                        st.success("🟢 Verified Paid")
-                    elif is_overdue:
-                        st.error("🔴 OVERDUE")
-                    else:
-                        st.warning("🟡 Scheduled / Pending")
+                with cols[2]:
+                    st.markdown(f"<div><b>{status_text}</b><br><small style='color:gray;'>Due: {inst['date'].strftime('%b %d')}</small></div>", unsafe_allow_html=True)
                         
-                with cols[4]:
-                    # Inline Checkmark Toggle Action
+                with cols[3]:
                     button_label = "Undo" if inst["paid"] else "Mark Paid"
                     if st.button(button_label, key=f"btn_{inst['template_id']}_{inst['date_str']}", use_container_width=True):
                         key = (inst["template_id"], inst["date_str"])
