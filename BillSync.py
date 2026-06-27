@@ -80,23 +80,7 @@ def generate_instances(templates, start_date, end_date):
 st.title("💸 BillSync: Recurring Bill Planner")
 st.markdown("---")
 
-# Sidebar - Global Navigation & KPI Metrics
-with st.sidebar:
-    st.header("Analytics Summary")
-    today = datetime.now().date()
-    
-    # Core Logic: Total Monthly Spend Calculation Widget
-    start_of_month = today.replace(day=1)
-    end_of_month = today.replace(day=calendar.monthrange(today.year, today.month)[1])
-    this_months_bills = generate_instances(st.session_state.templates, start_of_month, end_of_month)
-    
-    total_committed = sum(b["amount"] for b in this_months_bills)
-    total_paid = sum(b["amount"] for b in this_months_bills if b["paid"])
-    
-    st.metric(label="Total June Commitment", value=f"£{total_committed:,.2f}")
-    st.metric(label="Total Paid So Far", value=f"£{total_paid:,.2f}")
-    st.progress(total_paid / total_committed if total_committed > 0 else 0.0)
-
+today = datetime.now().date()
 # Main View Tabbing Layout
 tab1, tab2 = st.tabs(["🗂️ Grid View (Template Management)", "📅 Timeline View (Live Feed)"])
 
@@ -156,6 +140,7 @@ with tab1:
                         st.rerun()
 
 # --- TAB 2: TIMELINE VIEW ---
+# --- TAB 2: TIMELINE VIEW ---
 with tab2:
     st.subheader("Chronological Expense Stream")
     
@@ -172,32 +157,12 @@ with tab2:
     # Generate instances dynamically via Template vs Instance Logic
     all_instances = generate_instances(st.session_state.templates, start_range, end_range)
     
-    # --- STICKY OVERDUE SECTION ---
-    st.markdown("### 🚨 Sticky Overdue Tracker")
-    overdue_bills = [b for b in all_instances if b["date"] < today and not b["paid"]]
-    
-    if overdue_bills:
-        for ob in overdue_bills:
-           with st.container(): # Pinned layout context block
-                st.markdown(
-                    f"<div style='background-color:#ffebe9; padding:10px; border-radius:5px; border-left:5px solid #ff4d4d; margin-bottom:10px'>"
-                    f"<span style='color:#cc0000; font-weight:bold;'>[OVERDUE]</span> "
-                    f"<b>{ob['name']}</b> was due on {ob['date'].strftime('%b %d, %Y')} — <b>£{ob['amount']:.2f}</b>"
-                    f"</div>", 
-                    unsafe_allow_html=True
-                )
-    else:
-        st.info("Great job! No past-due bills detected in this window cycle.")
-        
-    st.markdown("---")
-    
     # --- TIME-BASED GROUPED FEED ---
     st.markdown("### 🧭 Live Feed Stream")
     
     if not all_instances:
         st.warning("No generated schedule instances fall within this selected timeframe.")
     else:
-        # Group generated array by Month strings for visual cleaner headers
         current_bucket = ""
         
         for inst in all_instances:
@@ -207,10 +172,9 @@ with tab2:
                 current_bucket = inst_bucket
                 st.markdown(f"#### 📅 {current_bucket}")
                 
-            # Formatting styles based on condition
+            # Determine if this specific item is overdue
             is_past = inst["date"] < today
-            card_bg = "#f0f2f6" if is_past and inst["paid"] else "#ffffff"
-            text_opacity = "0.6" if is_past and inst["paid"] else "1.0"
+            is_overdue = is_past and not inst["paid"]
             
             # Row render
             with st.container(border=True):
@@ -220,6 +184,8 @@ with tab2:
                     st.write(f"**{inst['date'].strftime('%d %a')}**")
                 
                 with cols[1]:
+                    # Fade out text only if it's in the past AND fully paid
+                    text_opacity = "0.5" if (is_past and inst["paid"]) else "1.0"
                     st.markdown(f"<span style='opacity:{text_opacity}; font-weight:bold;'>{inst['name']}</span>", unsafe_allow_html=True)
                     st.caption(f"{inst['category']} • {inst['method']}")
                     
@@ -232,7 +198,6 @@ with tab2:
                         label_visibility="collapsed"
                     )
                     if new_amt != float(inst["amount"]):
-                        # Mutate the values dynamically inside the session state
                         key = (inst["template_id"], inst["date_str"])
                         if key not in st.session_state.overrides:
                             st.session_state.overrides[key] = {"amount": new_amt, "paid": inst["paid"]}
@@ -241,8 +206,11 @@ with tab2:
                         st.rerun()
                         
                 with cols[3]:
+                    # Dynamic Status Box Color Logic
                     if inst["paid"]:
                         st.success("🟢 Verified Paid")
+                    elif is_overdue:
+                        st.error("🔴 OVERDUE")
                     else:
                         st.warning("🟡 Scheduled / Pending")
                         
