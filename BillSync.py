@@ -473,6 +473,9 @@ with tab2:
         if inst.get("_is_overdue_flag", False):
             return "_overdue"
         elif d < today:
+            # Check if it falls within the current month and year
+            if d.month == today.month and d.year == today.year:
+                return "_earlier_this_month"
             return d.strftime("%B %Y")
         elif d == today:
             return "_today"
@@ -564,8 +567,11 @@ with tab2:
         if buckets["_overdue"]:
             ordered_buckets.append(("_overdue", "⚠️ ACTIVELY OVERDUE", None))
 
+        # Add the new section immediately before "Today"
+        ordered_buckets.append(("_earlier_this_month", f"📅 Earlier This Month — {today.strftime('%B %Y')}", "No historical items logged earlier this month."))
+
         ordered_buckets += [
-            ("_today",            f"📅 Today — {today.strftime('%b %d')}",                                                                "Nothing due today — enjoy the day off."),
+            ("_today",            f"📅 Today — {today.strftime('%b %d')}",                                                                     "Nothing due today — enjoy the day off."),
             ("_this_week",        f"📅 This Week — {(today + timedelta(days=1)).strftime('%b %d')} to {this_week_end.strftime('%b %d')}",  "Nothing due in the next 6 days."),
             ("_next_week",        f"📅 Next Week — {next_week_start.strftime('%b %d')} to {next_week_end.strftime('%b %d')}",              "Nothing due next week."),
             ("_later_this_month", f"📅 Later This Month — {today.strftime('%B')}",                                                         "Nothing else due this month."),
