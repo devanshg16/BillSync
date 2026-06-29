@@ -110,9 +110,27 @@ def add_template(user_id, name, amount, frequency, day, category, method, auto_p
     conn.commit()
     conn.close()
 
+def update_template_rules(template_id, name, amount, category, method):
+    conn = get_conn()
+    conn.execute(
+        """UPDATE templates 
+           SET name = ?, amount = ?, category = ?, method = ?
+           WHERE id = ?""",
+        (name, amount, category, method, template_id)
+    )
+    conn.commit()
+    conn.close()
+
 def set_template_active(template_id: int, active: bool):
     conn = get_conn()
     conn.execute("UPDATE templates SET active = ? WHERE id = ?", (int(active), template_id))
+    conn.commit()
+    conn.close()
+
+def hard_delete_template(template_id: int):
+    conn = get_conn()
+    conn.execute("DELETE FROM overrides WHERE template_id = ?", (template_id,))
+    conn.execute("DELETE FROM templates WHERE id = ?", (template_id,))
     conn.commit()
     conn.close()
 
@@ -189,7 +207,7 @@ def reload_user_data():
     st.session_state.overrides = load_overrides(uid)
 
 def logout():
-    for key in ["user", "templates", "overrides"]:
+    for key in ["user", "templates", "overrides", "editing_template_id"]:
         st.session_state.pop(key, None)
 
 # ============================================================
@@ -203,7 +221,6 @@ init_db()
 # ============================================================
 
 if "user" not in st.session_state:
-
     st.markdown(
         """
         <style>
@@ -257,11 +274,10 @@ if "user" not in st.session_state:
                             st.success(msg + " Please sign in.")
                         else:
                             st.error(msg)
-
     st.stop()
 
 # ============================================================
-# LOAD USER DATA INTO SESSION (if not already loaded)
+# LOAD USER DATA INTO SESSION
 # ============================================================
 
 if "templates" not in st.session_state or "overrides" not in st.session_state:
@@ -273,13 +289,14 @@ if "templates" not in st.session_state or "overrides" not in st.session_state:
 
 today = datetime.now().date()
 
-# --- GLOBAL CSS ---
+# --- GLOBAL CSS (Fixes top padding cut-offs and sticky headers) ---
 st.markdown(
     """
     <style>
     div[data-testid="stAppViewBlockContainer"],
     div[data-testid="stMainBlockContainer"] {
-        padding-top: 1.5rem !important;
+        padding-top: 3.5rem !important;
+        padding-bottom: 1rem !important;
         margin-top: 0px !important;
     }
 
@@ -300,12 +317,16 @@ st.markdown(
         padding-bottom: 15px !important;
         border-bottom: 2px solid #f0f2f6 !important;
     }
+
+    header[data-testid="stHeader"] {
+        z-index: 99;
+    }
     </style>
     """,
     unsafe_allow_html=True
 )
 
-# --- TOP BAR: user info + logout ---
+# --- TOP BAR ---
 top_l, top_r = st.columns([6, 1])
 with top_l:
     st.markdown(f"<span style='color:#888; font-size:0.9rem;'>Signed in as <b>{st.session_state.user['username']}</b></span>", unsafe_allow_html=True)
@@ -351,34 +372,87 @@ with tab1:
                         st.success(f"Template for '{new_name}' saved!")
                         st.rerun()
 
+    active_templates = [t for t in st.session_state.templates if t["active"]]
+    paused_templates = [t for t in st.session_state.templates if not t["active"]]
+
     st.markdown("### 📋 Active Subscriptions & Liabilities")
-    if not st.session_state.templates:
-        st.info("No templates yet. Use the form above to add your first bill.")
+    if not active_templates:
+        st.info("No active templates yet. Use the form above to add your first bill.")
     else:
-        for tmpl in st.session_state.templates:
-            status_color = "🟢 Active" if tmpl["active"] else "⚪ Archived/Paused"
+        for idx, tmpl in enumerate(active_templates):
             with st.container(border=True):
-                c1, c2, c3, c4 = st.columns([2, 2, 2, 1], vertical_alignment="center")
+                c1, c2, c3, c4 = st.columns([3, 1, 1, 1], vertical_alignment="center")
                 with c1:
                     st.markdown(f"<b style='font-size:1.1rem;'>{tmpl['name']}</b>", unsafe_allow_html=True)
-                    st.caption(f"Tag: {tmpl['category']} | Status: {status_color}")
+                    st.caption(f"Tag: {tmpl['category']} | Source: {tmpl['method']} | Cycle: Day {tmpl['day']} ({tmpl['frequency']})")
+                    st.markdown(f"**Cost:** £{tmpl['amount']:.2f} | **Auto-Pay:** {'✅ Yes' if tmpl['auto_pay'] else '❌ Manual'}")
+                
                 with c2:
-                    st.markdown(f"**Cost:** £{tmpl['amount']:.2f} ({tmpl['frequency']})")
-                    st.caption(f"Payment Source: {tmpl['method']}")
+                    if st.button("✏️ Edit", key=f"edit_act_{tmpl['id']}_{idx}", use_container_width=True):
+                        st.session_state["editing_template_id"] = tmpl['id']
+                        st.rerun()
+                        
                 with c3:
-                    st.markdown(f"**Auto-Pay:** {'✅ Yes' if tmpl['auto_pay'] else '❌ Manual'}")
-                    st.caption(f"Day Cycle target: Day {tmpl['day']}")
+                    if st.button("⏸️ Pause", key=f"pause_{tmpl['id']}_{idx}", use_container_width=True):
+                        set_template_active(tmpl["id"], False)
+                        reload_user_data()
+                        st.success(f"Paused future instances for {tmpl['name']}.")
+                        st.rerun()
+                        
                 with c4:
-                    if tmpl["active"]:
-                        if st.button("Archive/Pause", key=f"pause_{tmpl['id']}", use_container_width=True):
-                            set_template_active(tmpl["id"], False)
+                    if st.button("🗑️ Delete", key=f"delete_act_{tmpl['id']}_{idx}", use_container_width=True):
+                        hard_delete_template(tmpl["id"])
+                        reload_user_data()
+                        st.warning(f"Completely wiped all ledger history for {tmpl['name']}.")
+                        st.rerun()
+
+            # --- INLINE EDIT CONTAINER ---
+            if st.session_state.get("editing_template_id") == tmpl['id']:
+                with st.form(key=f"edit_form_{tmpl['id']}", clear_on_submit=True):
+                    st.markdown("#### Edit Template Details")
+                    edit_name = st.text_input("Bill Name", value=tmpl['name'])
+                    edit_amount = st.number_input("Standard Amount (£)", value=float(tmpl['amount']), step=0.01)
+                    edit_cat = st.selectbox("Category", ["Utilities", "Subscriptions", "Rent", "Insurance", "Other"], index=["Utilities", "Subscriptions", "Rent", "Insurance", "Other"].index(tmpl['category']))
+                    edit_method = st.text_input("Payment Method", value=tmpl['method'])
+                    
+                    sc1, sc2 = st.columns([1, 5])
+                    with sc1:
+                        if st.form_submit_button("Save"):
+                            update_template_rules(tmpl['id'], edit_name, edit_amount, edit_cat, edit_method)
+                            del st.session_state["editing_template_id"]
                             reload_user_data()
                             st.rerun()
-                    else:
-                        if st.button("Reactivate", key=f"reactivate_{tmpl['id']}", use_container_width=True):
-                            set_template_active(tmpl["id"], True)
-                            reload_user_data()
+                    with sc2:
+                        if st.form_submit_button("Cancel"):
+                            del st.session_state["editing_template_id"]
                             st.rerun()
+
+    # --- PAUSED BILL TEMPLATES SECTION ---
+    st.markdown("---")
+    st.subheader("⏸️ Paused Bill Templates")
+    if not paused_templates:
+        st.caption("No templates currently paused.")
+    else:
+        for idx, tmpl in enumerate(paused_templates):
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([4, 1, 1], vertical_alignment="center")
+                with c1:
+                    st.markdown(f"<span style='color: #888;'><b style='font-size:1.1rem;'>{tmpl['name']} (Paused)</b></span>", unsafe_allow_html=True)
+                    st.caption(f"Amount: £{tmpl['amount']:.2f} | Scheduling suspended — ledger logs remain safe.")
+                
+                with c2:
+                    if st.button("▶️ Unpause", key=f"unpause_{tmpl['id']}_{idx}", use_container_width=True):
+                        set_template_active(tmpl["id"], True)
+                        reload_user_data()
+                        st.success(f"Re-activated scheduling loops for {tmpl['name']}!")
+                        st.rerun()
+                        
+                with c3:
+                    if st.button("🗑️ Delete", key=f"delete_psd_{tmpl['id']}_{idx}", use_container_width=True):
+                        hard_delete_template(tmpl["id"])
+                        reload_user_data()
+                        st.warning(f"Completely removed historical items for {tmpl['name']}.")
+                        st.rerun()
 
 # ============================================================
 # TAB 2: TIMELINE VIEW
@@ -389,12 +463,16 @@ with tab2:
         """
         <style>
         div[data-testid="stVerticalBlock"] > div:has(div[data-testid="stSlider"]) {
-            position: sticky;
-            top: 2.875rem;
-            background-color: white;
-            z-index: 99;
-            padding-top: 10px;
-            padding-bottom: 15px;
+            position: sticky !important;
+            
+            /* THE FIX: Reduced from 3.5rem to pull the block higher up */
+            top: -0.5rem !important; 
+            
+            background-color: #ffffff !important; 
+            z-index: 998 !important; 
+            padding-top: 15px !important; 
+            padding-bottom: 15px !important;
+            margin-bottom: 15px !important;
         }
         </style>
         """,
@@ -418,7 +496,6 @@ with tab2:
         end_range
     )
 
-    # --- STEP 1: ROLLING WINDOW CALCULATION ---
     most_recent_past_dates = {}
     for inst in all_instances:
         if inst["date"] < today:
@@ -426,7 +503,6 @@ with tab2:
             if name not in most_recent_past_dates or inst["date"] > most_recent_past_dates[name]:
                 most_recent_past_dates[name] = inst["date"]
 
-    # --- STEP 2: APPLY ROLLING RULES & FILTER ---
     filtered_instances = []
     for inst in all_instances:
         is_past = inst["date"] < today
@@ -454,7 +530,6 @@ with tab2:
             inst["_is_overdue_flag"] = is_overdue
             filtered_instances.append(inst)
 
-    # --- STEP 3: SORTING ---
     def get_sort_key(inst):
         current_month_start = today.replace(day=1)
         if inst.get("_is_overdue_flag", False):
@@ -463,7 +538,6 @@ with tab2:
 
     filtered_instances.sort(key=get_sort_key)
 
-    # --- STEP 4: BUCKET CONFIG ---
     this_week_end  = today + timedelta(days=6)
     next_week_start = today + timedelta(days=7)
     next_week_end  = today + timedelta(days=13)
@@ -473,7 +547,6 @@ with tab2:
         if inst.get("_is_overdue_flag", False):
             return "_overdue"
         elif d < today:
-            # Check if it falls within the current month and year
             if d.month == today.month and d.year == today.year:
                 return "_earlier_this_month"
             return d.strftime("%B %Y")
@@ -488,7 +561,6 @@ with tab2:
         else:
             return d.strftime("%B %Y")
 
-    # --- STEP 5: CARD RENDERER ---
     def render_card(inst):
         is_past    = inst["date"] < today
         is_overdue = inst.get("_is_overdue_flag", False)
@@ -567,34 +639,58 @@ with tab2:
         if buckets["_overdue"]:
             ordered_buckets.append(("_overdue", "⚠️ ACTIVELY OVERDUE", None))
 
-        # Add the new section immediately before "Today"
         ordered_buckets.append(("_earlier_this_month", f"📅 Earlier This Month — {today.strftime('%B %Y')}", "No historical items logged earlier this month."))
 
         ordered_buckets += [
             ("_today",            f"📅 Today — {today.strftime('%b %d')}",                                                                     "Nothing due today — enjoy the day off."),
             ("_this_week",        f"📅 This Week — {(today + timedelta(days=1)).strftime('%b %d')} to {this_week_end.strftime('%b %d')}",  "Nothing due in the next 6 days."),
             ("_next_week",        f"📅 Next Week — {next_week_start.strftime('%b %d')} to {next_week_end.strftime('%b %d')}",              "Nothing due next week."),
-            ("_later_this_month", f"📅 Later This Month — {today.strftime('%B')}",                                                         "Nothing else due this month."),
         ]
 
-        ordered_buckets += future_month_buckets
+        # --- DYNAMIC "LATER THIS MONTH / NEXT MONTH" CHECK ---
+        last_day_of_month = calendar.monthrange(today.year, today.month)[1]
+        month_end_date = today.replace(day=last_day_of_month)
+        
+        has_dynamic_next_month_header = False
+        dynamic_next_month_key = ""
+
+        if next_week_end < month_end_date:
+            ordered_buckets.append(("_later_this_month", f"📅 Later This Month — {today.strftime('%B %Y')}", "Nothing else due this month."))
+        elif next_week_end.month != today.month:
+            next_month_display = next_week_end.strftime('%B %Y')
+            ordered_buckets.append(("_later_this_month", f"📅 Later in {next_month_display}", f"Nothing else scheduled for the remainder of {next_week_end.strftime('%B')}. "))
+            
+            has_dynamic_next_month_header = True
+            dynamic_next_month_key = next_week_end.strftime("%B %Y")
+
+        # --- APPEND FUTURE MONTHS (Filtering out duplicates) ---
+        for bkey, blabel, bmsg in future_month_buckets:
+            if has_dynamic_next_month_header and bkey == dynamic_next_month_key:
+                continue
+            ordered_buckets.append((bkey, blabel, bmsg))
 
         # --- STEP 7: RENDER ---
         for bucket_key, bucket_label, empty_msg in ordered_buckets:
+            is_past_bucket = bucket_key == "_earlier_this_month" or bucket_key in [m[0] for m in past_month_buckets]
+            header_opacity = "0.5" if is_past_bucket else "1.0"
+
             if bucket_key == "_overdue":
                 st.markdown('<div id="overdue-marker" style="position: relative; top: -160px;"></div>', unsafe_allow_html=True)
                 st.markdown(f"#### {bucket_label}")
-            else:
+            elif bucket_key == "_today":
+                st.markdown('<div id="today-marker" style="position: relative; top: -160px;"></div>', unsafe_allow_html=True)
                 st.markdown(f"#### {bucket_label}")
+            else:
+                st.markdown(f"<div style='opacity: {header_opacity};'><h4>{bucket_label}</h4></div>", unsafe_allow_html=True)
 
             items = buckets.get(bucket_key, [])
             if items:
                 for inst in items:
                     render_card(inst)
             elif empty_msg:
-                st.markdown(f"<div style='color: #999; font-style: italic; padding: 8px 4px;'>— {empty_msg}</div>", unsafe_allow_html=True)
-
-        # --- AUTOSCROLL ---
+                st.markdown(f"<div style='color: #999; font-style: italic; padding: 8px 4px; opacity: {header_opacity};'>— {empty_msg}</div>", unsafe_allow_html=True)
+                
+        # --- AUTOSCROLL (Overdue fallback to Today) ---
         st.components.v1.html(
             """
             <script>
@@ -605,15 +701,21 @@ with tab2:
                     function safeScroll() {
                         setTimeout(function() {
                             var element = parentDoc.getElementById("overdue-marker");
+                            
+                            if (!element) {
+                                element = parentDoc.getElementById("today-marker");
+                            }
+                            
                             if (!element) {
                                 var headers = parentDoc.querySelectorAll('h4');
                                 for (var i = 0; i < headers.length; i++) {
-                                    if (headers[i].textContent.includes("📅")) {
+                                    if (headers[i].textContent.includes("Today") || headers[i].textContent.includes("📅")) {
                                         element = headers[i];
                                         break;
                                     }
                                 }
                             }
+                            
                             if (element) {
                                 element.scrollIntoView({ behavior: "smooth", block: "start" });
                             }
