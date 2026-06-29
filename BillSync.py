@@ -80,12 +80,12 @@ st.markdown(
     /* Target the first element inside each tab (our subheader/controls) and stick it */
     div[data-testid="stTabPanel"] > div[data-testid="stVerticalBlock"] > div:first-child {
         position: sticky !important;
-        top: 0rem !important; /* Move it up to snap right to the very top edge */
+        top: 0rem !important;
         background-color: white !important;
         z-index: 999 !important;
         padding-top: 10px !important;
         padding-bottom: 15px !important;
-        border-bottom: 2px solid #f0f2f6 !important;
+        border-bottom: 2px solid #f0f2f6 !important;  /* <-- keep this one */
     }
     </style>
     """,
@@ -162,12 +162,12 @@ with tab2:
         /* Target the top layout elements or columns inside this tab */
         div[data-testid="stVerticalBlock"] > div:has(div[data-testid="stSlider"]) {
             position: sticky;
-            top: 2.875rem; /* Aligns right underneath Streamlit's main header navbar */
-            background-color: white; /* Matches standard app background to prevent text overlap transparency */
+            top: 2.875rem;
+            background-color: white;
             z-index: 99;
             padding-top: 10px;
             padding-bottom: 15px;
-            border-bottom: 1px solid #e6e6e6;
+            border-bottom: 1px solid #e6e6e6;  /* <-- remove this line only */
         }
         </style>
         """,
@@ -244,28 +244,32 @@ with tab2:
     if not filtered_instances:
         st.warning("No generated schedule instances fall within this selected timeframe.")
     else:
-        current_bucket = ""
-        overdue_header_placed = False
-        
-        for inst in filtered_instances:
+        # Pre-calculate rolling window boundaries
+        this_week_end = today + timedelta(days=6)
+        next_week_start = today + timedelta(days=7)
+        next_week_end = today + timedelta(days=13)
+
+        def get_bucket_key(inst):
+            d = inst["date"]
+            if inst.get("_is_overdue_flag", False):
+                return "_overdue"
+            elif d < today:
+                return d.strftime("%B %Y")
+            elif d == today:
+                return "_today"
+            elif d <= this_week_end:
+                return "_this_week"
+            elif d <= next_week_end:
+                return "_next_week"
+            elif d.month == today.month and d.year == today.year:
+                return "_later_this_month"
+            else:
+                return d.strftime("%B %Y")
+
+        def render_card(inst):
             is_past = inst["date"] < today
             is_overdue = inst.get("_is_overdue_flag", False)
-            
-            if is_overdue:
-                if not overdue_header_placed:
-                    # Bring back the relative invisible target anchor block
-                    st.markdown('<div id="overdue-marker" style="position: relative; top: -160px;"></div>', unsafe_allow_html=True)
-                    st.markdown("#### 📅 ⚠️ ACTIVELY OVERDUE")
-                    overdue_header_placed = True
-                current_bucket = "⚠️ ACTIVELY OVERDUE"
-            else:
-                # Normal calendar month header grouping (Calculated dynamically)
-                inst_bucket = inst["date"].strftime("%B %Y")
-                if inst_bucket != current_bucket:
-                    current_bucket = inst_bucket
-                    st.markdown(f"#### 📅 {current_bucket}")
-            
-            # Determine Status Badge Text
+
             if inst["paid"]:
                 status_text = "🟢 Verified Paid"
             elif is_overdue:
@@ -275,12 +279,10 @@ with tab2:
 
             with st.container(border=True):
                 cols = st.columns([3, 2, 2, 1.5], vertical_alignment="center")
-                
                 with cols[0]:
                     text_opacity = "0.5" if (is_past and inst["paid"]) else "1.0"
                     st.markdown(f"<div style='opacity:{text_opacity};'><b style='font-size:1.15rem;'>{inst['name']}</b></div>", unsafe_allow_html=True)
                     st.caption(f"{inst['category']} • {inst['method']}")
-                    
                 with cols[1]:
                     new_amt = st.number_input(
                         "Amount Due (£)",
@@ -297,23 +299,80 @@ with tab2:
                         else:
                             st.session_state.overrides[key]["amount"] = new_amt
                         st.rerun()
-                        
                 with cols[2]:
                     st.markdown(f"<div><b>{status_text}</b><br><small style='color:gray;'>Due: {inst['date'].strftime('%b %d')}</small></div>", unsafe_allow_html=True)
-                        
                 with cols[3]:
                     button_label = "Undo" if inst["paid"] else "Mark Paid"
                     if st.button(button_label, key=f"btn_{inst['template_id']}_{inst['date_str']}", use_container_width=True):
                         key = (inst["template_id"], inst["date_str"])
                         target_state = not inst["paid"]
-                        
                         if key not in st.session_state.overrides:
                             st.session_state.overrides[key] = {"amount": inst["amount"], "paid": target_state}
                         else:
                             st.session_state.overrides[key]["paid"] = target_state
                         st.rerun()
 
-        # --- STEP 4: AUTOMATIC VIEWPORT FOCUS INJECTION ---
+        # --- GROUP INSTANCES BY BUCKET ---
+        from collections import defaultdict
+        buckets = defaultdict(list)
+        for inst in filtered_instances:
+            buckets[get_bucket_key(inst)].append(inst)
+
+        # --- COLLECT ALL PAST MONTH BUCKETS IN RANGE ---
+        past_month_buckets = []
+        cursor = start_range.replace(day=1)
+        while cursor < today.replace(day=1):
+            key = cursor.strftime("%B %Y")
+            past_month_buckets.append((key, f"📅 {key}", f"Nothing due in {cursor.strftime('%B %Y')} — all clear for this period."))
+            cursor = (cursor + timedelta(days=32)).replace(day=1)
+
+        # --- COLLECT ALL FUTURE MONTH BUCKETS IN RANGE ---
+        future_month_buckets = []
+        cursor = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+        while cursor <= end_range:
+            key = cursor.strftime("%B %Y")
+            future_month_buckets.append((key, f"📅 {key}", f"Nothing scheduled in {cursor.strftime('%B %Y')} — enjoy the quiet."))
+            cursor = (cursor + timedelta(days=32)).replace(day=1)
+
+        # --- DEFINE FULL ORDERED BUCKET LIST ---
+        ordered_buckets = []
+
+        # Past months (only if lookback > 0)
+        if lookback > 0:
+            ordered_buckets += past_month_buckets
+
+        # Overdue (only show header if there are overdue items)
+        if buckets["_overdue"]:
+            ordered_buckets.append(("_overdue", "⚠️ ACTIVELY OVERDUE", None))
+
+        # Current month buckets — always shown
+        ordered_buckets += [
+            ("_today",            f"📅 Today — {today.strftime('%b %d')}",                                                               "Nothing due today — enjoy the day off."),
+            ("_this_week",        f"📅 This Week — {(today + timedelta(days=1)).strftime('%b %d')} to {this_week_end.strftime('%b %d')}", "Nothing due in the next 6 days."),
+            ("_next_week",        f"📅 Next Week — {next_week_start.strftime('%b %d')} to {next_week_end.strftime('%b %d')}",             "Nothing due next week."),
+            ("_later_this_month", f"📅 Later This Month — {today.strftime('%B')}",                                                        "Nothing else due this month."),
+        ]
+
+        # Future months
+        ordered_buckets += future_month_buckets
+
+        # --- RENDER ALL BUCKETS IN ORDER ---
+        for bucket_key, bucket_label, empty_msg in ordered_buckets:
+            # Overdue anchor + header
+            if bucket_key == "_overdue":
+                st.markdown('<div id="overdue-marker" style="position: relative; top: -160px;"></div>', unsafe_allow_html=True)
+                st.markdown(f"#### {bucket_label}")
+            else:
+                st.markdown(f"#### {bucket_label}")
+
+            items = buckets.get(bucket_key, [])
+            if items:
+                for inst in items:
+                    render_card(inst)
+            else:
+                if empty_msg:
+                    st.markdown(f"<div style='color: #999; font-style: italic; padding: 8px 4px;'>— {empty_msg}</div>", unsafe_allow_html=True)
+
         st.components.v1.html(
             """
             <script>
@@ -339,25 +398,34 @@ with tab2:
                         }, 150);
                     }
 
-                    // Clear any old polling interval so we don't stack them on rerenders
+                    var tabs = parentDoc.querySelectorAll('button[role="tab"]');
+                    var isTab2Active = tabs[1] && tabs[1].getAttribute('aria-selected') === 'true';
+
+                    // Scroll on widget rerenders while Tab 2 is active
+                    if (isTab2Active) {
+                        safeScroll();
+                    }
+
+                    // Always update the last known state so the poller
+                    // always has a fresh baseline after every rerender
+                    parentWin._tab2LastState = isTab2Active;
+
+                    // Clear and restart the poller on every rerender so it
+                    // always has a fresh reference to _tab2LastState
                     if (parentWin._tab2PollInterval) {
                         clearInterval(parentWin._tab2PollInterval);
                     }
 
-                    var prevTab2State = null;
-
                     parentWin._tab2PollInterval = setInterval(function() {
                         var tabs = parentDoc.querySelectorAll('button[role="tab"]');
                         if (!tabs[1]) return;
+                        var isNowActive = tabs[1].getAttribute('aria-selected') === 'true';
 
-                        var isTab2Active = tabs[1].getAttribute('aria-selected') === 'true';
-
-                        // Detect the exact moment Tab 2 becomes active
-                        if (isTab2Active && prevTab2State === false) {
+                        if (isNowActive && parentWin._tab2LastState === false) {
                             safeScroll();
                         }
 
-                        prevTab2State = isTab2Active;
+                        parentWin._tab2LastState = isNowActive;
                     }, 200);
                 })();
             </script>
